@@ -1,20 +1,6 @@
 #+TITLE:US energy use, climate, and population
 #+PROPERTY: header-args:R :session *R* :cache no :results output :exports both :tangle yes
 ------------
-* load libraries
-#+BEGIN_SRC R :exports none :results none
-library(ascii)
-library(broom)
-library(plyr)
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-options(asciiType = "org")
-org.ascii <- function(x) {
-  suppressWarnings(ascii(x))
-}
-#+END_SRC
-
 * Census Data
 ** Download from  Baruch College
 https://www.baruch.cuny.edu/confluence/display/geoportal/US+Census+Population+Centroids
@@ -70,8 +56,12 @@ wget -O data/climate/hdd_qt_ll.csv https://raw.githubusercontent.com/TedwardErke
 * Merge Census with climate
 ** libraries
 #+begin_src R
+
 library(sp)
 library(raster)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
 #+end_src
 
 #+RESULTS:
@@ -90,35 +80,233 @@ proj4string(cdd) <- CRS("+init=epsg:4326")
 
 ** read in census tracts
 #+begin_src R
-trks <- shapefile("data/census_centroid_pop/popctr_tracts2010.shp")
+  trks <- shapefile("data/census_centroid_pop/popctr_tracts2010.shp")
+
+  trks <- trks[trks@data$POPULATION != 0,]
+
+trks <- spTransform(trks, CRS("+init=epsg:4326"))
 #+end_src
 
 #+RESULTS:
 
 ** find closest hdd to each census block centroid
 #+begin_src R
-hdd.dists <- spDists(blks, hdd, longlat = T)
-hdd.dists.min <- apply(dists, 1, function(x) which(x == min(x))[1])
-hdd <- hdd[dists.min,]
+  out <- lapply(1:length(trks), function(i) {
+      hdd.dists <- spDists(trks[i,], hdd, longlat = T)
+      hdd.dists.min <- apply(hdd.dists, 1, function(x) which(x == min(x))[1])
+      hdd.out <- hdd[hdd.dists.min,]
+})
+hdd.trks <- do.call("rbind", out)
 #+end_src
 
 #+RESULTS:
-: Error: identicalCRS(x, y) is not TRUE
-: Error in apply(dists, 1, function(x) which(x == min(x))[1]) :
-:   object 'dists' not found
-: Error in hdd[dists.min, ] : object 'dists.min' not found
 
 ** find closest cdd to each census block centroid
 #+begin_src R
-cdd.dists <- spDists(blks, cdd, longlat = T)
-cdd.dists.min <- apply(dists, 1, function(x) which(x == min(x))[1])
-cdd <- cdd[dists.min,]
+  cdd.out <- lapply(1:length(trks), function(i) {
+      cdd.dists <- spDists(trks[i,], cdd, longlat = T)
+      cdd.dists.min <- apply(cdd.dists, 1, function(x) which(x == min(x))[1])
+      cdd.out <- cdd[cdd.dists.min,]
+})
+cdd.trks <- do.call("rbind", cdd.out)
+
 #+end_src
 
+** bind climate to census
+#+begin_src R
+  d <- bind_cols(cdd.trks@data, hdd.trks@data, trks@data) %>%
+     dplyr::select(LATITUDE, LONGITUDE, POPULATION, hdd, cdd, TRACT)
+#+end_src
+
+#+RESULTS:
+** save census tracks with HDD and CDD
+#+BEGIN_SRC sh
+mkdir data/census_climate
+#+END_SRC
+
+#+RESULTS:
+
+#+begin_src R
+write.csv(d, "data/census_climate/tracts_wHDDCDD.csv")
+#+end_src
+
+#+RESULTS:
+
+* plot US census tracts in hdd and cdd space
+** libraries
+#+begin_src R
+library(sp)
+library(raster)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+#+end_src
+
+#+RESULTS:
+#+begin_example
+
+Attaching package: ‘dplyr’
+
+The following objects are masked from ‘package:raster’:
+
+    intersect, select, union
+
+The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+Attaching package: ‘tidyr’
+
+The following object is masked from ‘package:raster’:
+
+    extract
+#+end_example
+** read in data
+#+begin_src R
+    d <- read.csv("data/census_climate/tracts_wHDDCDD.csv") %>%
+      mutate(pop_th = POPULATION / 1000)
+
+#+end_src
+
+#+RESULTS:
+
+combine tracts that have same hdd and cdd to make there be fewer points.
+#+begin_src R
+  d <- d %>%
+    group_by(station, cdd, station1, hdd) %>%
+    summarize(pop_th = sum(pop_th)) %>%
+    mutate(city = "") #add blank city for plotly            
+#+end_src
+
+#+RESULTS:
+
+** plot
+#+begin_src R
+  totalpop <- sum(d$pop_th)
+  d.morehdd <- d %>% 
+      mutate(more_hdd = hdd > cdd) %>% 
+      group_by(more_hdd) %>% 
+      summarize(pop_th = sum(pop_th)) %>% 
+    mutate(pct.pop = pop_th / totalpop * 100) %>%
+      data.frame()
+  d.morehdd
+#+end_src
+
+#+RESULTS:
+:   more_hdd    pop_th  pct.pop
+: 1    FALSE  71147.27 22.76922
+: 2     TRUE 241324.06 77.23078
+
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts.png :width 900 :height 330
+    climpop <-   ggplot(d, aes(x = hdd, y = cdd, text = city)) + # text=city for plotly later
+              stat_summary_hex(aes(z = pop_th), fun = "sum", binwidth = c(200,200)) +
+        coord_equal() +
+        scale_fill_distiller(name = "Population (thousands)", trans = "log", palette = "YlOrBr", direction = 1, breaks = c(1, 10, 100, 1000,8000)) +
+        annotate("segment",x = 0, y = 0, xend = 6000, yend = 6000, alpha = .5) +
+        annotate("text", label = "More\nCooling\nNeeded", x = 3800, y = 5000) +
+        annotate("text", label = "23%\nof U.S.", x = 2700, y = 5000) +
+        annotate("text", label = "More\nHeating\nNeeded", x = 5000, y = 3800) +
+        annotate("text", label = "77%\nof U.S.", y = 3700, x = 6500) +
+        labs(x = "Heating Degree Days", y = "Cooling Degree Days") +
+        theme_classic() +
+        theme(text = element_text(size = 20)) +
+        theme(legend.position = c(.8, .8)) 
+
+  climpop +
+        geom_segment(x = 4400, xend = 4400, y = 4500, yend = 6000, arrow = arrow()) +
+        geom_segment(y = 4400, yend = 4400, x = 4500, xend = 6000, arrow = arrow())
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts.png]]
 
 
-* Get Cities Data
-* Merge Cities with Climate
-* Plot
+* Read in data of cities with their climate from my climate repo
+
+it worked at commit fe1e444f3abe402a6ff962cc61c4a411a6073294
+
+#+BEGIN_SRC sh
+mkdir data/cities
+wget -O data/cities/cities_hdd_cdd.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/cities_hdd_cdd.csv
+#+END_SRC
+
+#+RESULTS:
+
+#+BEGIN_SRC R
+cities <- read.csv("data/cities/cities_hdd_cdd.csv", stringsAsFactors = F)
+#+END_SRC
+
+#+RESULTS:
+
+** Add citites to Plot
+Large cities, geographically distinct cities, and Madison
+Madison, WI = 83
+anchorage = 63
+honoluulu = 54
+seattle = 21
+miami = 44
+sanfranciso = 14
+memphis 20
+#+begin_src R
+    cities.head <- cities %>% 
+      slice(c(83, 1:6,9, 63, 54, 20, 21, 14, 44))
+#+end_src
+
+#+RESULTS:
+
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts_cities.png :width 900 :height 330
+  climpop + 
+      geom_segment(x = 4400, xend = 4400, y = 4500, yend = 6000, arrow = arrow()) +
+      geom_segment(y = 4400, yend = 4400, x = 4500, xend = 6000, arrow = arrow()) +
+      geom_text(data = cities.head, aes(label = city), nudge_y = 200) +
+      geom_point(data = cities.head) 
+
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts_cities.png]]
+
+top 1000 cities 
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts_allcities.png :width 900 :height 330
+    climpop + 
+  #      geom_text(data = cities, aes(label = city), check_overlap = T,nudge_y = 200) +
+        geom_point(data = cities, aes(size = population)) +
+        scale_size(range = c(0,3), guide = "none") +
+        geom_segment(x = 4400, xend = 4400, y = 4500, yend = 6000, arrow = arrow()) +
+        geom_segment(y = 4400, yend = 4400, x = 4500, xend = 6000, arrow = arrow())
+
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts_allcities.png]]
+
+
+#+begin_src R
+    library(plotly)
+  library(htmlwidgets)
+
+      climpopcities <- climpop + 
+          geom_point(data = head(cities,100), aes(size = population), alpha = .6) +
+          scale_size(range = c(0,3), guide = "none") 
+
+
+  hdd_cdd_pop_cities <- ggplotly(climpopcities, tooltip = c("text"))
+  saveWidget(hdd_cdd_pop_cities, "populations_in_cdd_hdd_space.html", selfcontained = F)
+#+end_src
+
+#+RESULTS:
+
+move html to figs, because I can't make it be created there....
+#+begin_src sh
+mv populations_in_cdd_hdd_space.html figs/populations_in_cdd_hdd_space.html
+mv populations_in_cdd_hdd_space_files figs/populations_in_cdd_hdd_space_files
+#+end_src
+
+#+RESULTS:
+
 * Get Recs by state/region
 *
