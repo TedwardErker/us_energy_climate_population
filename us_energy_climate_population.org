@@ -1,0 +1,124 @@
+#+TITLE:US energy use, climate, and population
+#+PROPERTY: header-args:R :session *R* :cache no :results output :exports both :tangle yes
+------------
+* load libraries
+#+BEGIN_SRC R :exports none :results none
+library(ascii)
+library(broom)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+options(asciiType = "org")
+org.ascii <- function(x) {
+  suppressWarnings(ascii(x))
+}
+#+END_SRC
+
+* Census Data
+** Download from  Baruch College
+https://www.baruch.cuny.edu/confluence/display/geoportal/US+Census+Population+Centroids
+#+BEGIN_QUOTE
+US Census Population Centroids
+
+Datasets on this page are licensed under a Creative Commons Attribution 4.0 International License.
+
+The datasets on this page were produced by the GIS Lab at the Newman
+Library of Baruch College, CUNY using data from the US Census
+Bureau. The point layers were created in NAD83 (2010 and 2000) and
+NAD27 (historic) and are intended for use by researchers, policy
+makers, students, and educators for basic geographic analysis and
+mapping purposes. Population centroids represent the mean center of
+population in a given area, and are often used for calculating
+distances from a population's distribution to a given good or service.
+
+#+END_QUOTE
+
+I download census tracts, because it's fine enough for what I'm
+doing.  If I did blocks it would be much slower.
+#+BEGIN_SRC sh
+mkdir data
+mkdir data/census_centroid_pop
+wget -O census_centroid_pop.zip http://faculty.baruch.cuny.edu/geoportal/data/us_popctr/popctr_tracts2010.zip
+unzip census_centroid_pop.zip -d data/census_centroid_pop/
+wget -O data/census_centroid_pop/metadata.xml http://faculty.baruch.cuny.edu/geoportal/metadata/us_popctr/popctr_blkgrp2010_ISO.xml
+rm census_centroid_pop.zip
+#+END_SRC
+
+#+RESULTS:
+| Archive:   | census_centroid_pop.zip                            |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.shp     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.shx     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010_ISO.xml |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.dbf     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.prj     |
+
+* Climate (HDD and CDD) data
+
+Download quality controlled cooling degree days (cdd) and heating
+degree days (hdd) at weather stations with Lat Long from my
+climate_normals repo.
+
+#+begin_src sh
+mkdir data/climate
+wget -O data/climate/cdd_qt_ll.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/cdd_qt_ll.csv
+wget -O data/climate/hdd_qt_ll.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/hdd_qt_ll.csv
+#+end_src
+
+#+RESULTS:
+
+* Merge Census with climate
+** libraries
+#+begin_src R
+library(sp)
+library(raster)
+#+end_src
+
+#+RESULTS:
+
+** hdd and cdd.  make spatialpoints and set crs
+#+begin_src R
+hdd <- read.csv("data/climate/hdd_qt_ll.csv", stringsAsFactors =F)
+coordinates(hdd) <- ~long + lat
+proj4string(hdd) <- CRS("+init=epsg:4326")
+cdd <- read.csv("data/climate/cdd_qt_ll.csv", stringsAsFactors =F)
+coordinates(cdd) <- ~long + lat
+proj4string(cdd) <- CRS("+init=epsg:4326")
+#+end_src
+
+#+RESULTS:
+
+** read in census tracts
+#+begin_src R
+trks <- shapefile("data/census_centroid_pop/popctr_tracts2010.shp")
+#+end_src
+
+#+RESULTS:
+
+** find closest hdd to each census block centroid
+#+begin_src R
+hdd.dists <- spDists(blks, hdd, longlat = T)
+hdd.dists.min <- apply(dists, 1, function(x) which(x == min(x))[1])
+hdd <- hdd[dists.min,]
+#+end_src
+
+#+RESULTS:
+: Error: identicalCRS(x, y) is not TRUE
+: Error in apply(dists, 1, function(x) which(x == min(x))[1]) :
+:   object 'dists' not found
+: Error in hdd[dists.min, ] : object 'dists.min' not found
+
+** find closest cdd to each census block centroid
+#+begin_src R
+cdd.dists <- spDists(blks, cdd, longlat = T)
+cdd.dists.min <- apply(dists, 1, function(x) which(x == min(x))[1])
+cdd <- cdd[dists.min,]
+#+end_src
+
+
+
+* Get Cities Data
+* Merge Cities with Climate
+* Plot
+* Get Recs by state/region
+*
