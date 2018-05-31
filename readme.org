@@ -1,0 +1,352 @@
+#+TITLE:US energy use, climate, and population
+#+PROPERTY: header-args:R :session *R* :cache no :results output :exports both :tangle yes
+------------
+* Census Data
+** Download from  Baruch College
+https://www.baruch.cuny.edu/confluence/display/geoportal/US+Census+Population+Centroids
+#+BEGIN_QUOTE
+US Census Population Centroids
+
+Datasets on this page are licensed under a Creative Commons Attribution 4.0 International License.
+
+The datasets on this page were produced by the GIS Lab at the Newman
+Library of Baruch College, CUNY using data from the US Census
+Bureau. The point layers were created in NAD83 (2010 and 2000) and
+NAD27 (historic) and are intended for use by researchers, policy
+makers, students, and educators for basic geographic analysis and
+mapping purposes. Population centroids represent the mean center of
+population in a given area, and are often used for calculating
+distances from a population's distribution to a given good or service.
+
+#+END_QUOTE
+
+I download census tracts, because it's fine enough for what I'm
+doing.  If I did blocks it would be much slower.
+#+BEGIN_SRC sh
+mkdir data
+mkdir data/census_centroid_pop
+wget -O census_centroid_pop.zip http://faculty.baruch.cuny.edu/geoportal/data/us_popctr/popctr_tracts2010.zip
+unzip census_centroid_pop.zip -d data/census_centroid_pop/
+wget -O data/census_centroid_pop/metadata.xml http://faculty.baruch.cuny.edu/geoportal/metadata/us_popctr/popctr_blkgrp2010_ISO.xml
+rm census_centroid_pop.zip
+#+END_SRC
+
+#+RESULTS:
+| Archive:   | census_centroid_pop.zip                            |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.shp     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.shx     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010_ISO.xml |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.dbf     |
+| inflating: | data/census_centroid_pop/popctr_tracts2010.prj     |
+
+* Climate (HDD and CDD) data
+
+Download quality controlled cooling degree days (cdd) and heating
+degree days (hdd) at weather stations with Lat Long from my
+climate_normals repo.
+
+#+begin_src sh
+mkdir data/climate
+wget -O data/climate/cdd_qt_ll.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/cdd_qt_ll.csv
+wget -O data/climate/hdd_qt_ll.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/hdd_qt_ll.csv
+#+end_src
+
+#+RESULTS:
+
+* Merge Census with climate
+** libraries
+#+begin_src R
+
+library(sp)
+library(raster)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+#+end_src
+
+#+RESULTS:
+
+** hdd and cdd.  make spatialpoints and set crs
+#+begin_src R
+hdd <- read.csv("data/climate/hdd_qt_ll.csv", stringsAsFactors =F)
+coordinates(hdd) <- ~long + lat
+proj4string(hdd) <- CRS("+init=epsg:4326")
+cdd <- read.csv("data/climate/cdd_qt_ll.csv", stringsAsFactors =F)
+coordinates(cdd) <- ~long + lat
+proj4string(cdd) <- CRS("+init=epsg:4326")
+#+end_src
+
+#+RESULTS:
+
+** read in census tracts
+#+begin_src R
+  trks <- shapefile("data/census_centroid_pop/popctr_tracts2010.shp")
+
+  trks <- trks[trks@data$POPULATION != 0,]
+
+trks <- spTransform(trks, CRS("+init=epsg:4326"))
+#+end_src
+
+#+RESULTS:
+
+** find closest hdd to each census block centroid
+#+begin_src R
+  out <- lapply(1:length(trks), function(i) {
+      hdd.dists <- spDists(trks[i,], hdd, longlat = T)
+      hdd.dists.min <- apply(hdd.dists, 1, function(x) which(x == min(x))[1])
+      hdd.out <- hdd[hdd.dists.min,]
+})
+hdd.trks <- do.call("rbind", out)
+#+end_src
+
+#+RESULTS:
+
+** find closest cdd to each census block centroid
+#+begin_src R
+  cdd.out <- lapply(1:length(trks), function(i) {
+      cdd.dists <- spDists(trks[i,], cdd, longlat = T)
+      cdd.dists.min <- apply(cdd.dists, 1, function(x) which(x == min(x))[1])
+      cdd.out <- cdd[cdd.dists.min,]
+})
+cdd.trks <- do.call("rbind", cdd.out)
+
+#+end_src
+
+** bind climate to census
+#+begin_src R
+  d <- bind_cols(cdd.trks@data, hdd.trks@data, trks@data) %>%
+     dplyr::select(LATITUDE, LONGITUDE, POPULATION, hdd, cdd, TRACT)
+#+end_src
+
+#+RESULTS:
+** save census tracks with HDD and CDD
+#+BEGIN_SRC sh
+mkdir data/census_climate
+#+END_SRC
+
+#+RESULTS:
+
+#+begin_src R
+write.csv(d, "data/census_climate/tracts_wHDDCDD.csv")
+#+end_src
+
+#+RESULTS:
+
+* plot US census tracts in hdd and cdd space
+** libraries
+#+begin_src R
+library(sp)
+library(raster)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+#+end_src
+
+#+RESULTS:
+#+begin_example
+
+Attaching package: ‘dplyr’
+
+The following objects are masked from ‘package:raster’:
+
+    intersect, select, union
+
+The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+Attaching package: ‘tidyr’
+
+The following object is masked from ‘package:raster’:
+
+    extract
+#+end_example
+** read in data
+#+begin_src R
+    d <- read.csv("data/census_climate/tracts_wHDDCDD.csv") %>%
+      mutate(pop_th = POPULATION / 1000)
+
+#+end_src
+
+#+RESULTS:
+
+combine tracts that have same hdd and cdd to make there be fewer points.
+#+begin_src R
+  d <- d %>%
+    group_by(station, cdd, station1, hdd) %>%
+    summarize(pop_th = sum(pop_th)) %>%
+    ungroup() %>%
+    mutate(city = "",  #add blank city for plotly
+           cdd = cdd / 1000,
+           hdd = hdd / 1000)
+
+#+end_src
+
+#+RESULTS:
+
+** plot
+#+begin_src R
+      totalpop <- sum(d$pop_th)
+      d.morehdd <- d %>%
+          mutate(more_hdd = hdd > cdd) %>%
+          group_by(more_hdd) %>%
+          summarize(pop_th = sum(pop_th)) %>%
+        mutate(pct.pop = pop_th / totalpop * 100) %>%
+          data.frame()
+      d.morehdd
+#+end_src
+
+#+RESULTS:
+:   more_hdd    pop_th  pct.pop
+: 1    FALSE  71147.27 22.76922
+: 2     TRUE 241324.06 77.23078
+
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts.png :width 900 :height 330
+    climpop <-   ggplot(d, aes(x = hdd, y = cdd, text = city)) + # text=city for plotly later
+              stat_summary_hex(aes(z = pop_th), fun = "sum", binwidth = c(.2,.2)) +
+        coord_equal() +
+        scale_fill_distiller(name = "Population (thousands)", trans = "log", palette = "YlOrBr", direction = 1, breaks = c(1, 10, 100, 1000,8000)) +
+        annotate("segment",x = 0, y = 0, xend = 6, yend = 6, alpha = .5) +
+        annotate("text", label = "More\nCooling\nNeeded", x = 3.4, y = 5, size = 6) +
+        annotate("text", label = "23%\nof U.S.", x = 2, y = 5.2, size = 6) +
+        annotate("text", label = "More\nHeating\nNeeded", x = 5, y = 3.5, size = 6) +
+        annotate("text", label = "77%\nof U.S.", y = 3.7, x = 6.7, size = 6) +
+        labs(x = "Heating Degree Days (thousands)", y = "Cooling Degree Days (thousands)") +
+        theme_classic() +
+        theme(text = element_text(size = 20)) +
+        theme(legend.position = c(.8, .8))
+
+  climpop +
+        geom_segment(x = 4.4, xend = 4.4, y = 4.5, yend = 6, arrow = arrow()) +
+        geom_segment(y = 4.4, yend = 4.4, x = 4.5, xend = 6, arrow = arrow())
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts.png]]
+
+
+* Read in data of cities with their climate from my climate repo
+
+it worked at commit fe1e444f3abe402a6ff962cc61c4a411a6073294
+
+#+BEGIN_SRC sh
+mkdir data/cities
+wget -O data/cities/cities_hdd_cdd.csv https://raw.githubusercontent.com/TedwardErker/climate_normals/master/data/cities_hdd_cdd.csv
+#+END_SRC
+
+#+RESULTS:
+
+#+BEGIN_SRC R
+cities <- read.csv("data/cities/cities_hdd_cdd.csv", stringsAsFactors = F) %>%
+    mutate(cdd = cdd / 1000,
+           hdd = hdd / 1000)
+#+END_SRC
+
+#+RESULTS:
+
+
+
+** Add citites to Plot
+Large cities, geographically distinct cities, and Madison
+Madison, WI = 83
+anchorage = 63
+honoluulu = 54
+seattle = 21
+miami = 44
+sanfranciso = 14
+memphis 20
+#+begin_src R
+  cities.head <- cities %>%
+    slice(c(83, 1:6,9, 63, 54, 20, 21, 14, 44))
+#+end_src
+
+#+RESULTS:
+
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts_cities.png :width 900 :height 330
+  climpop +
+      geom_segment(x = 4.4, xend = 4.4, y = 4.5, yend = 6, arrow = arrow()) +
+      geom_segment(y = 4.4, yend = 4.4, x = 4.5, xend = 6, arrow = arrow()) +
+      geom_text(data = cities.head, aes(label = city), nudge_y = .2, size = 6) +
+      geom_point(data = cities.head)
+
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts_cities.png]]
+
+top 1000 cities
+#+begin_src R :exports results :results graphics :file figs/hdd_cdd_tracts_allcities.png :width 900 :height 330
+    climpop +
+  #      geom_text(data = cities, aes(label = city), check_overlap = T,nudge_y = 200) +
+        geom_point(data = cities, aes(size = population)) +
+        scale_size(range = c(0,3), guide = "none") +
+        geom_segment(x = 4400, xend = 4400, y = 4500, yend = 6000, arrow = arrow()) +
+        geom_segment(y = 4400, yend = 4400, x = 4500, xend = 6000, arrow = arrow())
+
+#+end_src
+
+#+RESULTS:
+[[file:figs/hdd_cdd_tracts_allcities.png]]
+
+
+#+begin_src R
+      library(plotly)
+    library(htmlwidgets)
+
+        climpopcities <- climpop +
+            geom_point(data = head(cities,100), aes(size = population), alpha = .6) +
+            scale_size(range = c(0,3), guide = "none") +
+            theme(legend.position = "none")  # I remove the legend, because I can't move it.
+
+        hdd_cdd_pop_cities <- ggplotly(climpopcities, tooltip = c("text"))
+
+    hdd_cdd_pop_cities <- layout(hdd_cdd_pop_cities, font = list(family = "Times New Roman",
+                                         size = 1),
+         margin = list(l = 50, r = 0, t = 0, b = 50, autoexpand = F))
+
+
+
+    # I can't get the legent to move into the top right corner of the plot :(
+    #layout(hdd_cdd_pop_cities, legend = list(x = 1.8, y = 1.8))
+
+
+  saveWidget(hdd_cdd_pop_cities, "populations_in_cdd_hdd_space.html", selfcontained = F)
+#+end_src
+
+#+RESULTS:
+#+begin_example
+
+Attaching package: ‘plotly’
+
+The following object is masked from ‘package:ggplot2’:
+
+    last_plot
+
+The following object is masked from ‘package:raster’:
+
+    select
+
+The following object is masked from ‘package:stats’:
+
+    filter
+
+The following object is masked from ‘package:graphics’:
+
+    layout
+Error in layout(g, font = list(family = "Times New Roman")) :
+  object 'g' not found
+#+end_example
+
+move html to figs, because I can't make it be created there....
+#+begin_src sh
+mv populations_in_cdd_hdd_space.html figs/populations_in_cdd_hdd_space.html
+mv populations_in_cdd_hdd_space_files figs/populations_in_cdd_hdd_space_files
+#+end_src
+
+#+RESULTS:
+* Get Recs by state/region
+*
